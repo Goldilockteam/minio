@@ -5,6 +5,30 @@ Minio is an object storage server released under Apache License v2.0. It is comp
 
 Minio server is light enough to be bundled with the application stack, similar to NodeJS, Redis and MySQL.
 
+## Goldilock Notes
+To use "go get" functionality, the code needs to be accessed as follows:
+
+1. Get the **original** repo with go, set a remote to the Goldilock fork, and then pull the Goldilock changes:
+```sh
+go get -u github.com/minio/minio
+cd $HOME/go/src/github.com/minio/minio
+git remote add fork https://github.com/Goldilockteam/minio.git
+git fetch fork
+git pull fork master
+```
+2. Make changes to code
+3. Build changes from $HOME/go/src/github.com/minio/minio
+```sh
+make install
+```
+4. Test image in $HOME/go/bin
+5. Commit changes in the fork
+```sh
+git add .
+git commit -m "checkin comment"
+git push fork
+```
+
 ## Docker Container
 ### Stable
 ```
