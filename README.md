@@ -28,6 +28,11 @@ git add .
 git commit -m "checkin comment"
 git push fork
 ```
+6. To build for Raspberry Pi (ARM architecture), use the folloing command from $HOME/go/src/github.com/minio/minio
+```sh
+env GOOS=linux GOARCH=arm GOARM=7 go build
+```
+This results in a "minio" binary in that directory that will run on the Pi.
 
 ## Docker Container
 ### Stable
