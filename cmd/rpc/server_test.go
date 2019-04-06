@@ -77,11 +77,6 @@ func (t mytype) Foo(a *Auth, b *int) error {
 	return nil
 }
 
-// incompatible method because of unexported method.
-func (t mytype) foo(a *Auth, b *int) error {
-	return nil
-}
-
 // incompatible method because of first argument is not Authenticator.
 func (t *mytype) Bar(a, b *int) error {
 	return nil
@@ -258,8 +253,7 @@ func TestServerCall(t *testing.T) {
 	}
 
 	for i, testCase := range testCases {
-		buf := bufPool.Get()
-		defer bufPool.Put(buf)
+		buf := bytes.NewBuffer([]byte{})
 
 		err := testCase.server.call(testCase.serviceMethod, testCase.argBytes, buf)
 		expectErr := (err != nil)

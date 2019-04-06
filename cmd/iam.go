@@ -28,7 +28,7 @@ import (
 	"github.com/minio/minio-go/pkg/set"
 	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/auth"
-	"github.com/minio/minio/pkg/iam/policy"
+	iampolicy "github.com/minio/minio/pkg/iam/policy"
 	"github.com/minio/minio/pkg/madmin"
 )
 
@@ -60,9 +60,9 @@ type IAMSys struct {
 	iamCannedPolicyMap map[string]iampolicy.Policy
 }
 
-// Load - load iam.json
+// Load - loads iam subsystem
 func (sys *IAMSys) Load(objAPI ObjectLayer) error {
-	return sys.Init(objAPI)
+	return sys.refresh(objAPI)
 }
 
 // Init - initializes config system from iam.json
@@ -78,7 +78,7 @@ func (sys *IAMSys) Init(objAPI ObjectLayer) error {
 			defer ticker.Stop()
 			for {
 				select {
-				case <-globalServiceDoneCh:
+				case <-GlobalServiceDoneCh:
 					return
 				case <-ticker.C:
 					sys.refresh(objAPI)
@@ -94,23 +94,20 @@ func (sys *IAMSys) Init(objAPI ObjectLayer) error {
 	// the following reasons:
 	//  - Read quorum is lost just after the initialization
 	//    of the object layer.
-	retryTimerCh := newRetryTimerSimple(doneCh)
-	for {
-		select {
-		case _ = <-retryTimerCh:
-			// Load IAMSys once during boot.
-			if err := sys.refresh(objAPI); err != nil {
-				if err == errDiskNotFound ||
-					strings.Contains(err.Error(), InsufficientReadQuorum{}.Error()) ||
-					strings.Contains(err.Error(), InsufficientWriteQuorum{}.Error()) {
-					logger.Info("Waiting for IAM subsystem to be initialized..")
-					continue
-				}
-				return err
+	for range newRetryTimerSimple(doneCh) {
+		// Load IAMSys once during boot.
+		if err := sys.refresh(objAPI); err != nil {
+			if err == errDiskNotFound ||
+				strings.Contains(err.Error(), InsufficientReadQuorum{}.Error()) ||
+				strings.Contains(err.Error(), InsufficientWriteQuorum{}.Error()) {
+				logger.Info("Waiting for IAM subsystem to be initialized..")
+				continue
 			}
-			return nil
+			return err
 		}
+		break
 	}
+	return nil
 }
 
 // DeleteCannedPolicy - deletes a canned policy.
@@ -269,10 +266,44 @@ func (sys *IAMSys) DeleteUser(accessKey string) error {
 }
 
 // SetTempUser - set temporary user credentials, these credentials have an expiry.
-func (sys *IAMSys) SetTempUser(accessKey string, cred auth.Credentials) error {
+func (sys *IAMSys) SetTempUser(accessKey string, cred auth.Credentials, policyName string) error {
 	objectAPI := newObjectLayerFn()
 	if objectAPI == nil {
 		return errServerNotInitialized
+	}
+
+	sys.Lock()
+	defer sys.Unlock()
+
+	// If OPA is not set we honor any policy claims for this
+	// temporary user which match with pre-configured canned
+	// policies for this server.
+	if globalPolicyOPA == nil && policyName != "" {
+		p, ok := sys.iamCannedPolicyMap[policyName]
+		if !ok {
+			return errInvalidArgument
+		}
+		if p.IsEmpty() {
+			delete(sys.iamPolicyMap, accessKey)
+			return nil
+		}
+
+		data, err := json.Marshal(policyName)
+		if err != nil {
+			return err
+		}
+
+		configFile := pathJoin(iamConfigSTSPrefix, accessKey, iamPolicyFile)
+		if globalEtcdClient != nil {
+			err = saveConfigEtcd(context.Background(), globalEtcdClient, configFile, data)
+		} else {
+			err = saveConfig(context.Background(), objectAPI, configFile, data)
+		}
+		if err != nil {
+			return err
+		}
+
+		sys.iamPolicyMap[accessKey] = policyName
 	}
 
 	configFile := pathJoin(iamConfigSTSPrefix, accessKey, iamIdentityFile)
@@ -291,11 +322,29 @@ func (sys *IAMSys) SetTempUser(accessKey string, cred auth.Credentials) error {
 		return err
 	}
 
-	sys.Lock()
-	defer sys.Unlock()
-
 	sys.iamUsersMap[accessKey] = cred
 	return nil
+}
+
+// GetUserPolicy - returns canned policy name associated with a user.
+func (sys *IAMSys) GetUserPolicy(accessKey string) (policyName string, err error) {
+	objectAPI := newObjectLayerFn()
+	if objectAPI == nil {
+		return "", errServerNotInitialized
+	}
+
+	sys.RLock()
+	defer sys.RUnlock()
+
+	if _, ok := sys.iamUsersMap[accessKey]; !ok {
+		return "", errNoSuchUser
+	}
+
+	if _, ok := sys.iamPolicyMap[accessKey]; !ok {
+		return "", errNoSuchUser
+	}
+
+	return sys.iamPolicyMap[accessKey], nil
 }
 
 // ListUsers - list all users.
@@ -433,13 +482,13 @@ func (sys *IAMSys) IsAllowed(args iampolicy.Args) bool {
 	return args.IsOwner
 }
 
-var defaultContextTimeout = 5 * time.Minute
+var defaultContextTimeout = 30 * time.Second
 
 // Similar to reloadUsers but updates users, policies maps from etcd server,
 func reloadEtcdUsers(prefix string, usersMap map[string]auth.Credentials, policyMap map[string]string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultContextTimeout)
-	r, err := globalEtcdClient.Get(ctx, prefix, etcd.WithPrefix(), etcd.WithKeysOnly())
 	defer cancel()
+	r, err := globalEtcdClient.Get(ctx, prefix, etcd.WithPrefix(), etcd.WithKeysOnly())
 	if err != nil {
 		return err
 	}
@@ -458,7 +507,7 @@ func reloadEtcdUsers(prefix string, usersMap map[string]auth.Credentials, policy
 		//  prefix := "config/iam/users/"
 		//  v := trim(trim(key, prefix), base(key)) == "newuser"
 		//
-		user := strings.TrimSuffix(strings.TrimSuffix(string(kv.Key), prefix), path.Base(string(kv.Key)))
+		user := path.Clean(strings.TrimSuffix(strings.TrimPrefix(string(kv.Key), prefix), path.Base(string(kv.Key))))
 		if !users.Contains(user) {
 			users.Add(user)
 		}
@@ -497,7 +546,7 @@ func reloadEtcdUsers(prefix string, usersMap map[string]auth.Credentials, policy
 			if err = json.Unmarshal(pdata, &policyName); err != nil {
 				return err
 			}
-			policyMap[path.Base(prefix)] = policyName
+			policyMap[user] = policyName
 		}
 	}
 	return nil
@@ -505,8 +554,8 @@ func reloadEtcdUsers(prefix string, usersMap map[string]auth.Credentials, policy
 
 func reloadEtcdPolicies(prefix string, cannedPolicyMap map[string]iampolicy.Policy) error {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultContextTimeout)
-	r, err := globalEtcdClient.Get(ctx, prefix, etcd.WithPrefix(), etcd.WithKeysOnly())
 	defer cancel()
+	r, err := globalEtcdClient.Get(ctx, prefix, etcd.WithPrefix(), etcd.WithKeysOnly())
 	if err != nil {
 		return err
 	}
@@ -521,11 +570,11 @@ func reloadEtcdPolicies(prefix string, cannedPolicyMap map[string]iampolicy.Poli
 		// then strip off the remaining basename to obtain the prefix
 		// value, usually in the following form.
 		//
-		//  key := "config/iam/policys/newpolicy/identity.json"
-		//  prefix := "config/iam/policys/"
+		//  key := "config/iam/policies/newpolicy/identity.json"
+		//  prefix := "config/iam/policies/"
 		//  v := trim(trim(key, prefix), base(key)) == "newpolicy"
 		//
-		policyName := strings.TrimSuffix(strings.TrimSuffix(string(kv.Key), prefix), path.Base(string(kv.Key)))
+		policyName := path.Clean(strings.TrimSuffix(strings.TrimPrefix(string(kv.Key), prefix), path.Base(string(kv.Key))))
 		if !policies.Contains(policyName) {
 			policies.Add(policyName)
 		}
@@ -542,7 +591,7 @@ func reloadEtcdPolicies(prefix string, cannedPolicyMap map[string]iampolicy.Poli
 		if err = json.Unmarshal(pdata, &p); err != nil {
 			return err
 		}
-		cannedPolicyMap[path.Base(prefix)] = p
+		cannedPolicyMap[policyName] = p
 	}
 	return nil
 }
@@ -632,6 +681,22 @@ func reloadUsers(objectAPI ObjectLayer, prefix string, usersMap map[string]auth.
 	return nil
 }
 
+// Set default canned policies only if not already overridden by users.
+func setDefaultCannedPolicies(policies map[string]iampolicy.Policy) {
+	_, ok := policies["writeonly"]
+	if !ok {
+		policies["writeonly"] = iampolicy.WriteOnly
+	}
+	_, ok = policies["readonly"]
+	if !ok {
+		policies["readonly"] = iampolicy.ReadOnly
+	}
+	_, ok = policies["readwrite"]
+	if !ok {
+		policies["readwrite"] = iampolicy.ReadWrite
+	}
+}
+
 // Refresh IAMSys.
 func (sys *IAMSys) refresh(objAPI ObjectLayer) error {
 	iamUsersMap := make(map[string]auth.Credentials)
@@ -659,6 +724,9 @@ func (sys *IAMSys) refresh(objAPI ObjectLayer) error {
 			return err
 		}
 	}
+
+	// Sets default canned policies, if none set.
+	setDefaultCannedPolicies(iamCannedPolicyMap)
 
 	sys.Lock()
 	defer sys.Unlock()
