@@ -62,6 +62,8 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/lib/pq" // Register postgres driver
+
 	"github.com/minio/minio/pkg/event"
 	xnet "github.com/minio/minio/pkg/net"
 )
@@ -257,7 +259,7 @@ func NewPostgreSQLTarget(id string, args PostgreSQLArgs) (*PostgreSQLTarget, err
 	}
 
 	return &PostgreSQLTarget{
-		id:         event.TargetID{id, "postgresql"},
+		id:         event.TargetID{ID: id, Name: "postgresql"},
 		args:       args,
 		updateStmt: updateStmt,
 		deleteStmt: deleteStmt,

@@ -19,6 +19,7 @@ package cmd
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"testing"
 
@@ -77,9 +78,16 @@ func TestGuessIsRPC(t *testing.T) {
 	if guessIsRPCReq(nil) {
 		t.Fatal("Unexpected return for nil request")
 	}
+
+	u, err := url.Parse("http://localhost:9000/minio/lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	r := &http.Request{
 		Proto:  "HTTP/1.0",
 		Method: http.MethodPost,
+		URL:    u,
 	}
 	if !guessIsRPCReq(r) {
 		t.Fatal("Test shouldn't fail for a possible net/rpc request.")
@@ -95,18 +103,25 @@ func TestGuessIsRPC(t *testing.T) {
 
 // Tests browser request guess function.
 func TestGuessIsBrowser(t *testing.T) {
+	globalIsBrowserEnabled = true
 	if guessIsBrowserReq(nil) {
 		t.Fatal("Unexpected return for nil request")
 	}
 	r := &http.Request{
 		Header: http.Header{},
+		URL:    &url.URL{},
 	}
 	r.Header.Set("User-Agent", "Mozilla")
 	if !guessIsBrowserReq(r) {
-		t.Fatal("Test shouldn't fail for a possible browser request.")
+		t.Fatal("Test shouldn't fail for a possible browser request anonymous user")
+	}
+	r.Header.Set("Authorization", "Bearer token")
+	if !guessIsBrowserReq(r) {
+		t.Fatal("Test shouldn't fail for a possible browser request JWT user")
 	}
 	r = &http.Request{
 		Header: http.Header{},
+		URL:    &url.URL{},
 	}
 	r.Header.Set("User-Agent", "mc")
 	if guessIsBrowserReq(r) {
@@ -184,14 +199,15 @@ func TestContainsReservedMetadata(t *testing.T) {
 }
 
 var sseTLSHandlerTests = []struct {
+	URL               *url.URL
 	Header            http.Header
 	IsTLS, ShouldFail bool
 }{
-	{Header: http.Header{}, IsTLS: false, ShouldFail: false},                                        // 0
-	{Header: http.Header{crypto.SSECAlgorithm: []string{"AES256"}}, IsTLS: false, ShouldFail: true}, // 1
-	{Header: http.Header{crypto.SSECAlgorithm: []string{"AES256"}}, IsTLS: true, ShouldFail: false}, // 2
-	{Header: http.Header{crypto.SSECKey: []string{""}}, IsTLS: true, ShouldFail: false},             // 3
-	{Header: http.Header{crypto.SSECopyAlgorithm: []string{""}}, IsTLS: false, ShouldFail: true},    // 4
+	{URL: &url.URL{}, Header: http.Header{}, IsTLS: false, ShouldFail: false},                                        // 0
+	{URL: &url.URL{}, Header: http.Header{crypto.SSECAlgorithm: []string{"AES256"}}, IsTLS: false, ShouldFail: true}, // 1
+	{URL: &url.URL{}, Header: http.Header{crypto.SSECAlgorithm: []string{"AES256"}}, IsTLS: true, ShouldFail: false}, // 2
+	{URL: &url.URL{}, Header: http.Header{crypto.SSECKey: []string{""}}, IsTLS: true, ShouldFail: false},             // 3
+	{URL: &url.URL{}, Header: http.Header{crypto.SSECopyAlgorithm: []string{""}}, IsTLS: false, ShouldFail: true},    // 4
 }
 
 func TestSSETLSHandler(t *testing.T) {
@@ -206,6 +222,7 @@ func TestSSETLSHandler(t *testing.T) {
 		w := httptest.NewRecorder()
 		r := new(http.Request)
 		r.Header = test.Header
+		r.URL = test.URL
 
 		h := setSSETLSHandler(okHandler)
 		h.ServeHTTP(w, r)

@@ -41,6 +41,10 @@ const (
 type StorageInfo struct {
 	Used uint64 // Used total used per tenant.
 
+	Total uint64 // Total disk space.
+
+	Available uint64 // Total disk space available.
+
 	// Backend type.
 	Backend struct {
 		// Represents various backend types, currently on FS and Erasure.
@@ -96,6 +100,9 @@ type ObjectInfo struct {
 	// by the Content-Type header field.
 	ContentEncoding string
 
+	// Date and time at which the object is no longer able to be cached
+	Expires time.Time
+
 	// Specify object storage class
 	StorageClass string
 
@@ -103,11 +110,13 @@ type ObjectInfo struct {
 	UserDefined map[string]string
 
 	// List of individual parts, maximum size of upto 10,000
-	Parts []objectPartInfo `json:"-"`
+	Parts []ObjectPartInfo `json:"-"`
 
 	// Implements writer and reader used by CopyObject API
 	Writer       io.WriteCloser `json:"-"`
 	Reader       *hash.Reader   `json:"-"`
+	PutObjReader *PutObjReader  `json:"-"`
+
 	metadataOnly bool
 
 	// Date and time when the object was last accessed.
